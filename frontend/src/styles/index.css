@@ -1,0 +1,33 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', sans-serif;
+  background: #eef2f7;
+  color: #1f2937;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+body,
+input,
+button,
+select {
+  color: #1f2937;
+}
+
+button {
+  border: none;
+  cursor: pointer;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}

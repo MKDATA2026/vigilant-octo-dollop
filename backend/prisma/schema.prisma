@@ -1,0 +1,735 @@
+// MK DATA - Production-Ready Prisma Schema
+// Financial integrity, audit trails, concurrency control, idempotency
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum KYCStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum NetworkProvider {
+  MTN
+  AIRTEL
+  GLO
+  NINE_MOBILE
+}
+
+enum TransactionType {
+  WALLET_FUNDING
+  DATA_PURCHASE
+  AIRTIME_PURCHASE
+  CABLE_TV_PURCHASE
+  ELECTRICITY_PURCHASE
+  EDUCATION_PIN_PURCHASE
+  TRANSFER_OUT
+  TRANSFER_IN
+  AIRTIME_SWAP
+  COMMISSION_EARNED
+  COMMISSION_WITHDRAWAL
+}
+
+enum TransactionStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+enum LedgerType {
+  WALLET_FUND_CREDIT
+  DATA_PURCHASE_DEBIT
+  AIRTIME_PURCHASE_DEBIT
+  CABLE_TV_DEBIT
+  ELECTRICITY_DEBIT
+  EDUCATION_PIN_DEBIT
+  TRANSFER_DEBIT
+  TRANSFER_CREDIT
+  AIRTIME_SWAP_DEBIT
+  AIRTIME_SWAP_CREDIT
+  COMMISSION_CREDIT
+  COMMISSION_REVERSAL_DEBIT
+  COMMISSION_WITHDRAWAL_DEBIT
+  ADMIN_ADJUSTMENT_CREDIT
+  ADMIN_ADJUSTMENT_DEBIT
+}
+
+enum CommissionType {
+  DATA_PURCHASE
+  AIRTIME_PURCHASE
+  CABLE_TV_SUBSCRIPTION
+  ELECTRICITY_BILL
+  EDUCATION_PIN
+  MONEY_TRANSFER
+  AIRTIME_SWAP
+  REFERRAL_BONUS
+}
+
+enum CommissionStatus {
+  PENDING
+  APPROVED
+  CREDITED
+  REJECTED
+}
+
+enum NotificationType {
+  TRANSACTION_SUCCESS
+  TRANSACTION_FAILED
+  WALLET_FUNDED
+  MONEY_RECEIVED
+  COMMISSION_EARNED
+  COMMISSION_CREDITED
+  REFERRAL_BONUS
+  SECURITY_ALERT
+  PROMOTION
+  SERVICE_UPDATE
+}
+
+enum AdminAction {
+  CREATE
+  UPDATE
+  DELETE
+  APPROVE_COMMISSION
+  REJECT_COMMISSION
+  CREDIT_COMMISSION
+  MANUAL_WALLET_ADJUSTMENT
+  USER_SUSPENSION
+  USER_REACTIVATION
+  KYC_UPDATE
+  TRANSACTION_REVERSAL
+}
+
+// ============================================================================
+// CORE USER & WALLET MODELS
+// ============================================================================
+
+model User {
+  id                String        @id @default(uuid())
+  name              String
+  email             String        @unique
+  password          String        // Hashed with bcrypt, never store plain text
+  phone             String?       @unique
+  role              UserRole      @default(USER)
+  kyc_status        KYCStatus     @default(UNVERIFIED)
+  
+  // Referral system
+  referral_code     String?       @unique
+  referred_by_id    String?
+  
+  // Soft delete for audit trail preservation
+  deleted_at        DateTime?
+  
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  // Relations
+  wallet            Wallet?
+  transactions      Transaction[]
+  wallet_ledger     WalletLedger[]
+  orders            Order[]
+  commissions       Commission[]
+  referrals         User[]        @relation("Referrals")
+  referred_by       User?         @relation("Referrals", fields: [referred_by_id], references: [id], onDelete: SetNull)
+  notifications     Notification[]
+  transfer_from     Transfer[]    @relation("TransferFrom")
+  transfer_to       Transfer[]    @relation("TransferTo")
+  airtime_swaps_from AirtimeSwap[] @relation("SwapFrom")
+  airtime_swaps_to  AirtimeSwap[] @relation("SwapTo")
+  admin_logs        AdminLog[]    @relation("AdminUser")
+
+  // Indexes for common queries
+  @@index([email])
+  @@index([referral_code])
+  @@index([referred_by_id])
+  @@index([deleted_at])
+  @@index([createdAt])
+}
+
+model Wallet {
+  id                String        @id @default(uuid())
+  userId            String        @unique
+  balance           Decimal       @db.Decimal(12, 2) @default(0)
+  version           Int           @default(0)  // Optimistic locking for concurrency control
+  
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  // Relations - financial records must never be cascade deleted
+  user              User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  ledger_entries    WalletLedger[]
+  transactions      Transaction[]
+
+  // Indexes
+  @@index([userId])
+}
+
+model WalletLedger {
+  id                String        @id @default(uuid())
+  wallet_id         String
+  user_id           String        // Denormalized for query efficiency
+  type              LedgerType
+  amount            Decimal       @db.Decimal(12, 2)
+  reference         String?       // Links to Transaction ID, Commission ID, Transfer ID, etc.
+  description       String?
+  
+  createdAt         DateTime      @default(now())
+
+  // Relations - immutable, source of truth for wallet balance
+  wallet            Wallet        @relation(fields: [wallet_id], references: [id], onDelete: Restrict)
+  user              User          @relation(fields: [user_id], references: [id], onDelete: Restrict)
+
+  // Indexes for efficient historical queries and balance calculations
+  @@index([wallet_id, createdAt])
+  @@index([user_id, createdAt])
+  @@index([type])
+  @@index([reference])
+}
+
+// ============================================================================
+// TRANSACTION & AUDIT MODELS
+// ============================================================================
+
+model Transaction {
+  id                String            @id @default(uuid())
+  userId            String
+  walletId          String?
+  type              TransactionType
+  status            TransactionStatus @default(PENDING)
+  amount            Decimal           @db.Decimal(12, 2)
+  
+  // Idempotency control: prevent duplicate processing
+  reference         String            @unique      // MKDATA-<uuid>
+  idempotency_key   String?           @unique      // Client-provided key
+  
+  // Failure tracking
+  failure_code      String?           // e.g., "INSUFFICIENT_BALANCE", "NETWORK_TIMEOUT", "PROVIDER_REJECT"
+  failure_reason    String?
+  retry_count       Int               @default(0)
+  retry_at          DateTime?
+  
+  // Service-specific fields
+  network           NetworkProvider?
+  phoneNumber       String?
+  bundleCode        String?
+  note              String?
+  
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  // Relations - must not cascade delete to preserve audit trail
+  user              User              @relation(fields: [userId], references: [id], onDelete: Restrict)
+  wallet            Wallet?           @relation(fields: [walletId], references: [id], onDelete: SetNull)
+  order             Order?
+  transfer          Transfer?
+  airtime_swap      AirtimeSwap?
+  status_history    TransactionStatusHistory[]
+
+  // Indexes for efficient filtering and analytics
+  @@index([userId])
+  @@index([status])
+  @@index([type])
+  @@index([reference])
+  @@index([idempotency_key])
+  @@index([createdAt])
+  @@index([walletId])
+}
+
+model TransactionStatusHistory {
+  id                String            @id @default(uuid())
+  transaction_id    String
+  from_status       TransactionStatus
+  to_status         TransactionStatus
+  reason            String?           // Why status changed
+  changed_by        String?           // Admin ID or "SYSTEM"
+  
+  createdAt         DateTime          @default(now())
+
+  transaction       Transaction       @relation(fields: [transaction_id], references: [id], onDelete: Restrict)
+
+  @@index([transaction_id, createdAt])
+  @@index([changed_by])
+}
+
+// ============================================================================
+// DATA PRODUCTS & ORDERS
+// ============================================================================
+
+model DataProduct {
+  id                String          @id @default(uuid())
+  network           NetworkProvider
+  code              String          @unique
+  name              String
+  description       String?
+  price             Decimal         @db.Decimal(12, 2)
+  commission_percent Decimal        @db.Decimal(5, 2) @default(0)
+  active            Boolean         @default(true)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  orders            Order[]
+
+  @@index([network])
+  @@index([active])
+  @@index([code])
+}
+
+model Order {
+  id                String          @id @default(uuid())
+  userId            String
+  dataProductId     String
+  transactionId     String?         @unique
+  recipientPhone    String
+  status            TransactionStatus @default(PENDING)
+  amount            Decimal         @db.Decimal(12, 2)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  user              User            @relation(fields: [userId], references: [id], onDelete: Restrict)
+  dataProduct       DataProduct     @relation(fields: [dataProductId], references: [id], onDelete: Restrict)
+  transaction       Transaction?    @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([status])
+  @@index([transactionId])
+}
+
+// ============================================================================
+// AIRTIME PRODUCTS & PURCHASES
+// ============================================================================
+
+model AirtimeProduct {
+  id                String          @id @default(uuid())
+  network           NetworkProvider
+  amount            Decimal         @db.Decimal(12, 2)  // e.g., 100 for ₦100 airtime
+  code              String          @unique
+  name              String
+  description       String?
+  price             Decimal         @db.Decimal(12, 2)  // Selling price
+  commission_percent Decimal        @db.Decimal(5, 2) @default(0)
+  active            Boolean         @default(true)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([network])
+  @@index([active])
+}
+
+model AirtimePurchase {
+  id                String          @id @default(uuid())
+  userId            String
+  network           NetworkProvider
+  amount            Decimal         @db.Decimal(12, 2)
+  recipient_phone   String
+  transaction_id    String?         @unique
+  status            TransactionStatus @default(PENDING)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([userId])
+  @@index([status])
+}
+
+// ============================================================================
+// CABLE TV SUBSCRIPTIONS
+// ============================================================================
+
+model CableTVProvider {
+  id                String          @id @default(uuid())
+  code              String          @unique
+  name              String
+  description       String?
+  logo_url          String?
+  active            Boolean         @default(true)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  packages          CableTVPackage[]
+
+  @@index([active])
+}
+
+model CableTVPackage {
+  id                String          @id @default(uuid())
+  provider_id       String
+  code              String          @unique
+  name              String
+  description       String?
+  price             Decimal         @db.Decimal(12, 2)
+  validity_days     Int?
+  commission_percent Decimal        @db.Decimal(5, 2) @default(0)
+  active            Boolean         @default(true)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  provider          CableTVProvider @relation(fields: [provider_id], references: [id], onDelete: Cascade)
+  orders            CableTVOrder[]
+
+  @@index([provider_id])
+  @@index([active])
+}
+
+model CableTVOrder {
+  id                String          @id @default(uuid())
+  userId            String
+  package_id        String
+  smartcard_number_hash String       // Hash for uniqueness checks without storing sensitive data
+  smartcard_number_encrypted String? // Encrypted version - do not log/display
+  transaction_id    String?         @unique
+  status            TransactionStatus @default(PENDING)
+  amount            Decimal         @db.Decimal(12, 2)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  package           CableTVPackage  @relation(fields: [package_id], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([status])
+  @@index([smartcard_number_hash])
+}
+
+// ============================================================================
+// ELECTRICITY BILL PAYMENTS
+// ============================================================================
+
+model ElectricityProvider {
+  id                String          @id @default(uuid())
+  code              String          @unique
+  name              String
+  description       String?
+  logo_url          String?
+  active            Boolean         @default(true)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  orders            ElectricityOrder[]
+
+  @@index([active])
+}
+
+model ElectricityOrder {
+  id                String          @id @default(uuid())
+  userId            String
+  provider_id       String
+  meter_number_hash String          // Hash for uniqueness without storing sensitive data
+  meter_number_encrypted String?    // Encrypted version - do not log/display
+  meter_type        String          // PREPAID, POSTPAID
+  phone_number_hash String?         // Hash for verification
+  phone_number_encrypted String?    // Encrypted - do not log/display
+  transaction_id    String?         @unique
+  status            TransactionStatus @default(PENDING)
+  amount            Decimal         @db.Decimal(12, 2)
+  token             String?         // Prepaid token (may be sensitive - do not log)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  provider          ElectricityProvider @relation(fields: [provider_id], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([status])
+  @@index([meter_number_hash])
+}
+
+// ============================================================================
+// EDUCATION PINs / SCRATCH CARDS
+// ============================================================================
+
+model EducationProvider {
+  id                String          @id @default(uuid())
+  code              String          @unique
+  name              String
+  description       String?
+  logo_url          String?
+  active            Boolean         @default(true)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  pins              EducationPIN[]
+
+  @@index([active])
+}
+
+model EducationPIN {
+  id                String          @id @default(uuid())
+  provider_id       String
+  pin_type          String          // e.g., "WAEC", "NECO", "JAMB"
+  code              String          @unique
+  name              String
+  description       String?
+  price             Decimal         @db.Decimal(12, 2)
+  commission_percent Decimal        @db.Decimal(5, 2) @default(0)
+  quantity          Int             @default(1)
+  active            Boolean         @default(true)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  provider          EducationProvider @relation(fields: [provider_id], references: [id], onDelete: Cascade)
+  orders            EducationPINOrder[]
+
+  @@index([provider_id])
+  @@index([active])
+}
+
+model EducationPINOrder {
+  id                String          @id @default(uuid())
+  userId            String
+  pin_id            String
+  email_hash        String          // Hash for verification
+  email_encrypted   String?         // Encrypted email
+  phone_hash        String?         // Hash for verification
+  phone_encrypted   String?         // Encrypted phone
+  transaction_id    String?         @unique
+  status            TransactionStatus @default(PENDING)
+  amount            Decimal         @db.Decimal(12, 2)
+  pins_delivered    Boolean         @default(false)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  pin               EducationPIN    @relation(fields: [pin_id], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([status])
+  @@index([email_hash])
+}
+
+// ============================================================================
+// MONEY TRANSFERS
+// ============================================================================
+
+model Transfer {
+  id                String          @id @default(uuid())
+  from_user_id      String
+  to_user_id        String
+  amount            Decimal         @db.Decimal(12, 2)
+  description       String?
+  status            TransactionStatus @default(PENDING)
+  transaction_id    String?         @unique
+  transaction_ref   String          @unique
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  from_user         User            @relation("TransferFrom", fields: [from_user_id], references: [id], onDelete: Restrict)
+  to_user           User            @relation("TransferTo", fields: [to_user_id], references: [id], onDelete: Restrict)
+  transaction       Transaction?    @relation(fields: [transaction_id], references: [id], onDelete: SetNull)
+
+  @@index([from_user_id])
+  @@index([to_user_id])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// AIRTIME SWAP
+// ============================================================================
+
+model AirtimeSwap {
+  id                String          @id @default(uuid())
+  from_user_id      String
+  to_user_id        String
+  from_network      NetworkProvider
+  to_network        NetworkProvider
+  amount_sent       Decimal         @db.Decimal(12, 2)
+  amount_received   Decimal         @db.Decimal(12, 2)
+  from_phone        String          // Recipient's phone (do not log plaintext)
+  to_phone          String          // Recipient's phone (do not log plaintext)
+  status            TransactionStatus @default(PENDING)
+  transaction_id    String?         @unique
+  transaction_ref   String          @unique
+  exchange_rate     Decimal         @db.Decimal(10, 4)  // Captured at transaction time
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  from_user         User            @relation("SwapFrom", fields: [from_user_id], references: [id], onDelete: Restrict)
+  to_user           User            @relation("SwapTo", fields: [to_user_id], references: [id], onDelete: Restrict)
+  transaction       Transaction?    @relation(fields: [transaction_id], references: [id], onDelete: SetNull)
+
+  @@index([from_user_id])
+  @@index([to_user_id])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// REFERRAL SYSTEM
+// ============================================================================
+
+model ReferralCode {
+  id                String          @id @default(uuid())
+  user_id           String          @unique
+  code              String          @unique
+  generated_at      DateTime        @default(now())
+  expires_at        DateTime        @default(dbgenerated("NOW() + INTERVAL '1 year'"))
+  is_active         Boolean         @default(true)
+  uses_count        Int             @default(0)
+  
+  @@index([code])
+  @@index([user_id])
+}
+
+model ReferralAcceptance {
+  id                String          @id @default(uuid())
+  referrer_id       String
+  referred_id       String
+  code_used         String
+  accepted_at       DateTime        @default(now())
+  bonus_amount      Decimal         @db.Decimal(12, 2)
+  bonus_credited    Boolean         @default(false)
+  credited_at       DateTime?
+  
+  @@unique([referrer_id, referred_id])  // Each user can only be referred once per referrer
+  @@index([referrer_id])
+  @@index([referred_id])
+}
+
+// ============================================================================
+// COMMISSION & REWARDS
+// ============================================================================
+
+model Commission {
+  id                String          @id @default(uuid())
+  user_id           String
+  amount            Decimal         @db.Decimal(12, 2)
+  service_type      CommissionType
+  reference_transaction String?     // Links to Transaction ID
+  earned_from_user_id String?       // User who triggered this commission
+  status            CommissionStatus @default(PENDING)
+  
+  // Approval workflow
+  approved_by       String?         // Admin ID
+  approved_at       DateTime?
+  approval_reason   String?
+  
+  rejection_reason  String?
+  
+  // Crediting
+  credited_ledger_id String?        // Links to WalletLedger entry
+  credited_at       DateTime?
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  user              User            @relation(fields: [user_id], references: [id], onDelete: Restrict)
+
+  @@index([user_id])
+  @@index([status])
+  @@index([service_type])
+  @@index([approved_by])
+}
+
+// ============================================================================
+// NOTIFICATIONS
+// ============================================================================
+
+model Notification {
+  id                String          @id @default(uuid())
+  user_id           String
+  title             String
+  message           String
+  type              NotificationType
+  read              Boolean         @default(false)
+  related_transaction String?       // Transaction ID reference
+  action_url        String?
+  
+  createdAt         DateTime        @default(now())
+  read_at           DateTime?
+
+  user              User            @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([read])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// ADMIN AUDIT LOG
+// ============================================================================
+
+model AdminLog {
+  id                String          @id @default(uuid())
+  admin_id          String
+  action            AdminAction
+  entity_type       String          // "User", "Transaction", "Commission", etc.
+  entity_id         String
+  old_values        Json?           // JSON object of previous values
+  new_values        Json?           // JSON object of new values
+  success           Boolean
+  error_message     String?
+  ip_address        String?
+  user_agent        String?
+  
+  createdAt         DateTime        @default(now())
+
+  admin             User            @relation("AdminUser", fields: [admin_id], references: [id], onDelete: Restrict)
+
+  @@index([admin_id])
+  @@index([entity_type])
+  @@index([entity_id])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// EXCHANGE RATES & SERVICE CONFIG
+// ============================================================================
+
+model ExchangeRate {
+  id                String          @id @default(uuid())
+  service_type      String          // "airtime_swap", "transfer", etc.
+  from_currency     String          // e.g., "MTN_AIRTIME", "AIRTEL_AIRTIME"
+  to_currency       String
+  rate              Decimal         @db.Decimal(10, 4)  // e.g., 0.9500 for 95% conversion
+  effective_at      DateTime
+  expires_at        DateTime?       @default(dbgenerated("NOW() + INTERVAL '30 days'"))
+  active            Boolean         @default(true)
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([service_type, from_currency, to_currency, effective_at])
+  @@index([service_type])
+  @@index([active])
+  @@index([effective_at])
+}
+
+model ServiceConfig {
+  id                String          @id @default(uuid())
+  key               String          @unique
+  value             String
+  description       String?
+  updated_by        String?         // Admin ID
+  
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([key])
+}
