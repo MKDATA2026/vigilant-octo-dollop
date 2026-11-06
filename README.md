@@ -1,46 +1,19 @@
 # MK DATA
 
-MK DATA is a mobile-first Nigerian digital services application built to support wallet funding, mobile data purchases, and transaction history tracking.
+MK DATA is a mobile-first Nigerian digital-services application with a React frontend, Express API scaffold, and Supabase PostgreSQL schema.
 
-## Project structure
+## Current status
 
-- `backend/`: Node.js + Express API with mock database and authentication.
-- `frontend/`: React mobile-first UI for registration, login, dashboard, wallet, data purchase, and admin views.
+**Not production-ready.** The backend still uses an in-memory development repository. Accounts, wallet balances, and transactions are not persisted to Supabase. Do not accept customer deposits or real orders with this build.
 
-## Features
+Implemented: React registration/login/dashboard screens; Express routes for auth, profile, wallet, data catalogue, transactions, and admin; 26 Supabase public tables with RLS enabled; API health endpoint, JWT configuration guard, JSON body limit, configurable CORS; wallet funding and data purchase fail closed instead of falsely crediting money or claiming delivery.
 
-- User registration, login, logout, profile
-- Wallet balance display and funding
-- Mobile data purchase for MTN, Airtel, Glo, 9mobile
-- Transaction history list and recent activity
-- Admin dashboard for users, transactions, wallet funding, and order overview
-- Mock payment and VTU provider layer for safe development
+Outstanding: Prisma 7 runtime adapter and persistent PostgreSQL repository; production registration/login; atomic wallet ledger postings, idempotency, reversals, reconciliation; Monnify or other gateway checkout and signature-verified webhook; VTU provider integration, live catalogue, status polling, refunds; production admin provisioning, deployment secrets, automated and end-to-end tests.
 
-## Getting started
+Backend development: enter backend/, run npm install, copy .env.example to .env, set a unique random JWT_SECRET of at least 32 characters, then run npm run dev.
 
-### Backend
+Frontend development: enter frontend/, run npm install, set REACT_APP_API_URL if needed, then run npm start.
 
-1. Open a terminal in `backend`
-2. Run `npm install`
-3. Copy `.env.example` to `.env` and update `JWT_SECRET`
-4. Run `npm run dev`
+Never commit .env, database passwords, payment secrets, VTU credentials, or Supabase service-role keys.
 
-The backend will be available at `http://localhost:4000`.
-
-### Frontend
-
-1. Open a terminal in `frontend`
-2. Run `npm install`
-3. Run `npm start`
-
-The frontend will open at `http://localhost:3000` and use the backend API.
-
-## Admin account
-
-- Email: `admin@mkdata.com`
-- Password: `Password123!`
-
-## Notes
-
-- This version uses an in-memory mock database. No real payments or VTU services are connected.
-- The app is built as a production-ready foundation with clean REST routes, validation, protected routes, and mock service layers.
+Financial rules: credit wallets only after server-side verification of exact amount, currency, customer/reference, and success status; mark VTU orders successful only after provider confirmation; track wallet balance, wallet ledger, provider balance, provider cost, and gross profit separately. Example: NGN 800 selling price less NGN 650 provider cost = NGN 150 gross profit before other fees.

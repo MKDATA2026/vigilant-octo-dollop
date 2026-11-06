@@ -1,6 +1,7 @@
+const dotenv = require('dotenv');
+dotenv.config();
 const express = require('express');
 const cors = require('cors');
-const dotenv = require('dotenv');
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/user');
 const dataRoutes = require('./routes/data');
@@ -8,29 +9,19 @@ const walletRoutes = require('./routes/wallet');
 const transactionRoutes = require('./routes/transaction');
 const adminRoutes = require('./routes/admin');
 const { authenticate } = require('./middleware/auth');
-const { initializeMocks } = require('./repositories/mockDatabase');
-
-dotenv.config();
-
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) throw new Error('JWT_SECRET must be configured with at least 32 characters.');
 const app = express();
-app.use(cors());
-app.use(express.json());
-
-initializeMocks();
-
+const allowedOrigins = (process.env.CORS_ORIGINS || '').split(',').map(v => v.trim()).filter(Boolean);
+app.disable('x-powered-by');
+app.use(cors({ origin(origin, cb) { if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) return cb(null, true); return cb(new Error('Origin not allowed by CORS')); } }));
+app.use(express.json({ limit: '32kb' }));
+app.get('/api/health', (req, res) => res.status(200).json({ status: 'ok', mode: process.env.NODE_ENV || 'development' }));
 app.use('/api/auth', authRoutes);
 app.use('/api/users', authenticate, userRoutes);
 app.use('/api/data', authenticate, dataRoutes);
 app.use('/api/wallet', authenticate, walletRoutes);
 app.use('/api/transactions', authenticate, transactionRoutes);
 app.use('/api/admin', authenticate, adminRoutes);
-
-app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(err.status || 500).json({ error: err.message || 'Server error' });
-});
-
+app.use((err, req, res, next) => { if (res.headersSent) return next(err); if (err.message === 'Origin not allowed by CORS') return res.status(403).json({ error: 'Origin not allowed' }); console.error(err); res.status(err.status || 500).json({ error: process.env.NODE_ENV === 'production' ? 'Server error' : (err.message || 'Server error') }); });
 const port = process.env.PORT || 4000;
-app.listen(port, () => {
-  console.log(`MK DATA backend running on port ${port}`);
-});
+app.listen(port, () => console.log('MK DATA backend running on port ' + port));
